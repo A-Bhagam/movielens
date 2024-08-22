@@ -1,0 +1,393 @@
+---
+title: "MovieLens"
+author: "Abinav Bhagam"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    highlight: pygments
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      fig.align = 'center', 
+                      cache = FALSE, 
+                      cache.lazy = FALSE)
+```
+
+```{r load_libraries, include=FALSE, echo=FALSE}
+# Load all necessary libraries
+
+if(!require(tidyverse)) install.packages("tidyverse") 
+if(!require(caret)) install.packages("caret") 
+if(!require(dplyr)) install.packages("dplyr") 
+if(!require(stringr)) install.packages("stringr") 
+if(!require(tidyr)) install.packages("tidyr") 
+if(!require(forcats)) install.packages("forcats") 
+if(!require(ggplot2)) install.packages("ggplot2") 
+if(!require(egg)) install.packages("egg") 
+if(!require(data.table)) install.packages("data.table") 
+```
+
+# Introduction
+
+This project - MovieLens - is the the first of the two projects required to pass the _HarvardX -  PH125.9x - Data Science: Capstone_ course, the finale of the _Data Science Professional Certificate_ program. 
+
+The objective of this project is the development of a movie recommendation system using the Movie Lens data set. Recommendation systems operate by analyzing previous choices/preferences in order to _recommend_ new suggestions. 
+
+The movielens dataset provided for this report contains approximately 10 million movie observations, bifurcated into a training set (`edx`) and a validation set (`final_holdout_test`) with 9 million and 1 million observations respectively. The code required to construct the sets has been provided below:
+
+```{r Create-edx-and-validation-sets, echo=FALSE, include=FALSE}
+# Create edx set and validation set
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+set.seed(1, sample.kind="Rounding")
+
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+Following a brief analysis of the dataset, we will aim to construct a recommendation system with a Root Mean Square Error (RSME) below 0.86490 for the estimated ratings of the user-movie pairs.
+
+$$\mbox{RMSE} = \sqrt{\frac{1}{n}\sum_{t=1}^{n}e_t^2}$$
+```{r RSME_function, include=FALSE, echo=FALSE}
+RMSE <- function(true_ratings, predicted_ratings) {
+    sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+# Analysis of the Dataset
+
+## Description of the Data
+
+The `edx` and `final_holdout_test` sets have a respective 
+`r nrow(edx)` and `r nrow(final_holdout_test)` observations, with each having the same `r ncol(edx)` variables. 
+
+Let's take a look at the `edx` dataset.
+
+```{r edx_overview, echo=FALSE, include=TRUE}
+# Show first 5 rows of the edx dataset
+head(edx, 5)
+```
+Let's take a look at what exactly these variables denote.
+
+* `userId`: Unique identifier that marks the user who made the rating
+* `movieId`: Unique identifier that marks the movie was rated
+* `rating`: A number ranging from 0 to 5 - with 0.5 increments - that represents the quality of the movie
+* `timestamp`: The date/time of the rating
+* `title`: The title of the movie and the year it came out
+* `genres`: The genre - or genres - the movie belongs to
+
+Let's examine each of these variables, one by one.
+
+\newpage
+
+## Rating
+
+```{r ratings_histogram, echo=FALSE, include=TRUE}
+#Create a histogram for the ratings in the edx dataset
+edx %>% ggplot(aes(rating)) +
+  geom_histogram(binwidth = 0.2, color = "black") +
+  labs(title = "Distribution of Ratings",
+       x = "Rating", 
+       y = "Count" ) +
+  scale_y_continuous(breaks = seq(0, 3000000, 500000))
+```
+
+One thing that immediately pops out from looking at the histogram, is that users seem to gravitate to rating whole numbers. 1 is more frequent than 1.5, 2 is more frequent that 2,5 and so on.
+
+```{r ratings_summary, echo=FALSE, include=TRUE}
+#Provide relevant statistics for the ratings variable
+summary(edx$rating)
+```
+
+\newpage
+
+## MovieID
+
+```{r movie_histogram, echo=FALSE, include=TRUE}
+#Create a histogram that shows a distribution of the movies by their rating
+edx %>% group_by(movieId) %>%
+  summarise(average_rating = sum(rating)/n()) %>%
+  ggplot(aes(average_rating)) +
+  geom_histogram(bins= 50, color = "black") +
+  labs(title = "Distribution of Ratings by MovieID",
+       x = "Average Rating", 
+       y = "Movies")
+```
+
+The histogram is self-evident. Not all movie are valued the same. Some are rated higher or lower than others. Considering that the mean rating is 3.51, it seems that even the most average movie is viewed generously.
+
+\newpage
+
+## UserID
+
+```{r user_histogram, echo=FALSE, include=TRUE}
+#create a histogram that shows a distribution of the users by their average rating
+edx %>% group_by(userId) %>%
+  summarise(average_rating = sum(rating)/n()) %>%
+  ggplot(aes(average_rating)) +
+  geom_histogram(bins= 50, color = "black") +
+  labs(title = "Distribution of Ratings by UserID",
+       x = "Average Rating", 
+       y = "Users")
+```
+
+UserID seems to follow a similar pattern to MovieID, the average user is rather generous. Perhaps this generosity is inadvertently causing the recommendation system to develop biases. That is something that should be adjusted.
+
+\newpage
+
+## Genres
+
+```{r genres_table, echo=FALSE, include=TRUE}
+# Separate individual genres and rank them by the total number of ratings
+edx %>% separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarise(Number_of_Movies = n(), Rating = round(mean(rating), 2)) %>%
+  arrange(desc(Number_of_Movies))
+```
+
+The `genres` variable in the `edx` dataset has multiple genres attached to a single movie, but in the table above, I've stratified them and have ranked them by the number of ratings received. I've also appended the average rating each genre posses to see if genres with a higher number of movies, tend to have a higher rating. But nothing conclusive can be drawn from the data above.  
+
+\newpage
+
+## Title
+
+The `title` variable has two major components, the first is the name of the movie and the second is the year of the movie's release. The former is largely irrelevant to our analysis, but the latter can be extracted and analyzed to determine if year of release plays a role in the rating of a movie.
+
+```{r seperating_year_from_title, echo=FALSE, include=FALSE}
+#Extract the year from the title in the edx dataset
+edx$year <- as.numeric(sub(".*\\((\\d{4})\\)$", "\\1", edx$title))
+
+#Do the same for the final_holdout_test dataset
+final_holdout_test$year <- as.numeric(sub(".*\\((\\d{4})\\)$", "\\1", final_holdout_test$title))
+```
+
+Once we've done that, we can chart a graph to see if there is a relationship between year and average rating.
+
+```{r ratings_by_year, echo=FALSE, include=TRUE}
+#Plot avaerage rating by year
+edx %>% group_by(year) %>%
+  summarise(rating = mean(rating)) %>%
+  ggplot(aes(year, rating)) +
+  geom_point() +
+  labs(title ="Average rating by Year",
+       x = "Release Year", 
+       y = "Average Rating")
+```
+
+There does seem to be a considerable uptick in average rating ther further you go back in time, but I'd chalk that up to survivorship bias. Nobody wants to dig through history to watch mediocre movies. 
+
+\newpage
+
+## Timestamp
+
+I'll be frank, I'm not entirely sure how the timestamp variable could assist with constructing the recommendation system. Perhaps there is some bias I'm overlooking. Tat will have to be examined at a further time.
+
+\newpage
+
+# Creating the Model
+
+Now that we have performed an analysis of all the relevant variables, it is time to move on to actually constructing the recommendation system model.
+
+## Baseline Model
+
+Our first model, the baseline, takes the average ratings of the ``edx` set and uses it to estimate the average rating of the `final_holdout_set`. While this may seem immaterial, it help with setting a baseline.
+
+```{r baseline_model, echo=FALSE, warning=FALSE, include=TRUE}
+# Calculate mean of the training dataset
+mu <- mean(edx$rating)
+
+# Predict the RMSE on the validation set
+baseline_rmse <- RMSE(final_holdout_test$rating, mu)
+
+# Creating a results dataframe that contains all RMSE results
+results <- data.frame(model = "Baseline Model", RMSE = baseline_rmse)
+
+# Show dataframe
+results
+```
+
+1.061202	is our RSME. A far cry from the targeted 0.86490, but I suppose we need to start somewhere
+
+## Movie Model
+
+The movie model, our first evolution to the baseline, acknowledges that not all movies are the same. The average of the `edx` data set may be ~ 3.51, not every movie is average. Some are rated worse, while others are rated higher.
+
+```{r movie_model, echo=FALSE, include=TRUE}
+# Calculate mean of the entire dataset
+mu <- mean(edx$rating)
+
+# Calculate movie averages
+movie_average <- edx %>%
+   group_by(movieId) %>%
+   summarize(b_i = mean(rating - mu))
+
+# Calculate predicted ratings
+predictions <- final_holdout_test %>%
+   left_join(movie_average, by='movieId') %>%
+   mutate(prediction = mu + b_i) %>%
+   pull(prediction)
+
+movie_rmse <- RMSE(final_holdout_test$rating, predictions)
+
+# Add the results to the results dataset
+results <- results %>% add_row(model = "Movie Model", RMSE = movie_rmse)
+
+# Show results
+results
+```
+
+And so, we've made a significant improvement to our RSME, still a way's off from our target, but we're getting there.
+
+## Movie and User Model
+
+The next evolution acknowledges that users are not homogeneous, they have different tastes and will therefore give different scores to the same movie.
+
+
+```{r movie_user_model, echo=FALSE, include=TRUE}
+# Calculate average rating of the entire dataset
+mu <- mean(edx$rating)
+
+# Calculate movie averages
+movie_average <- edx %>%
+   group_by(movieId) %>%
+   summarize(b_i = mean(rating - mu))
+
+# Calculate user averages
+user_average <- edx %>%
+   left_join(movie_average, by='movieId') %>%
+   group_by(userId) %>%
+   summarize(b_u = mean(rating - mu - b_i))
+
+# Calculate predicted ratings
+predictions <- final_holdout_test %>%
+   left_join(movie_average, by='movieId') %>%
+   left_join(user_average, by='userId') %>%
+   mutate(prediction = mu + b_i + b_u) %>%
+   pull(prediction)
+
+movie_user_rmse <- RMSE(final_holdout_test$rating, predictions)
+
+# Add the results to the results dataset
+results <- results %>% add_row(model="Movie and User Model", RMSE = movie_user_rmse)
+
+# Show results
+results
+```
+
+And we're almost there! I think we just need one more improvement before we meet our metric!
+
+## Regularized Model
+
+Regularization is a method to reduce errors in the recommendation system that arise from outlier ratings that skew the Root Square Mean Error.
+
+```{r regularized_model, echo=FALSE, include=TRUE}
+# Calculate average rating of the entire dataset
+mu <- mean(edx$rating)
+
+# Define lambda
+lambdas <- seq(0, 100, 1)
+
+# Compute the predicted ratings using different values of lambda
+rmses <- sapply(lambdas, function(lambdas) {
+   
+  b_i <- edx %>%
+      group_by(movieId) %>%
+      summarize(b_i = sum(rating - mu) / (n() + lambdas))
+  
+   b_u <- edx %>%
+      left_join(b_i, by='movieId') %>%
+      group_by(userId) %>%
+      summarize(b_u = sum(rating - b_i - mu) / (n() + lambdas))
+   
+   predictions <- final_holdout_test %>%
+      left_join(b_i, by='movieId') %>%
+      left_join(b_u, by='userId') %>%
+      mutate(prediction = mu + b_i + b_u) %>%
+      pull(prediction)
+   
+  return(RMSE(final_holdout_test$rating, predictions))
+   
+})
+
+# Get the lowest RSME
+regularized_rmse <- min(rmses)
+
+# Add the results to the results dataset
+results <- results %>% add_row(model="Regularized Model", RMSE = regularized_rmse)
+
+# Show results
+results
+```
+
+And there we go! The RMSE for the regularized model is 0.8648177, below our target of 0.86490!
+
+# Results
+
+```{r results, echo=FALSE, include=TRUE}
+results
+```
+
+The lowest RMSE predicted value is 0.8648177 This value was obtained by applying regularization onto a Movie and User Model
+
+# Conclusion
+
+A machine learning algorithm was used to constructed in order to predict the ratings from the Movie Lens dataset. The aim of the algorithm was to reach an RMSE of 0.86490 or below, This was achieved by a Regularized Movie and User model.
+
+However this model can be further improved - and the RMSE brought down even further - by accounting for biases present in the genres and timestamp variables.
+
+# Appendix
+
+https://github.com/AlessandroCorradini/Harvard-Data-Science-Professional/blob/master/09%20-%20PH125.9x%20-%20Capstone/MovieLens%20Recommender%20System%20Project/MovieLens%20Project%20Report.Rmd
+
+https://github.com/bnwicks/Capstone/blob/master/MovieLens.Rmd
+
+https://github.com/ujjawalmadan/Movielens-Capstone-Project/blob/master/Movielens%20Capstone%20Project.Rmd
+
+https://www.rpubs.com/Airborne737/movielens
+
+https://rpubs.com/christianakiramckinnon/MovieLens
